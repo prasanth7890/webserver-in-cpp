@@ -92,6 +92,7 @@ int init() {
     }
    
     cout << "Request Received... \n\n";
+    cout << "----------- Http Request: -----------\n" << buffer << "\n";
 
     // parsing the request
     int output = parseRequest(buffer, res);
@@ -107,19 +108,27 @@ int init() {
 
     char ch;
     int idx = 0;
-    char response[DEFAULTBUFFER] = {0}; 
+    string response(DEFAULTBUFFER,'\0'); 
+
     while(ReadFile.get(ch)) {
-        cout << ch;
         response[idx] = ch;
         idx++;
     }
     ReadFile.close();
 
-    cout << "Response: \n" << response << "\n";
+    // adding headers to the response
+    string httpResponse = "HTTP/1.1 200 OK\r\n";
+    httpResponse += "Content-Type: text/html\r\n"; 
+    httpResponse += "Content-Length: " + to_string(response.length()) + "\r\n";
+    httpResponse += "Connection: close\r\n\r\n";
+    httpResponse += response;
 
-    if(send(AcceptSocket, response, DEFAULT_RESPONSE, 0) == SOCKET_ERROR) {
+    // sending response to client
+    if(send(AcceptSocket, httpResponse.c_str(), httpResponse.length(), 0) == SOCKET_ERROR) {
         cout << "sending failed \n";
     } 
+
+    cout << "----------- Http Response: -----------\n" << httpResponse << "\n";
 
     closesocket(AcceptSocket);
     WSACleanup();
@@ -177,4 +186,3 @@ bool isPathPresent(string path) {
     cout << "Error - Requested Page not Found! \n";
     return false;
 }
-
