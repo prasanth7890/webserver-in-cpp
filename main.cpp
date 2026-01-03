@@ -3,6 +3,8 @@
 #include <ws2tcpip.h>
 #include <vector>
 #include <fstream>
+#include <signal.h>
+#include "ThreadPool.h"
 
 using namespace std;
 
@@ -13,6 +15,11 @@ using namespace std;
 int parseRequest(char request[], int size);
 vector<string> split(string s, char d);
 bool isPathPresent(string path);
+void handleRequest(SOCKET AccpetSocket);
+
+bool stop = false;
+SOCKET globalListenSocket = INVALID_SOCKET; 
+
 
 //The WSAStartup function is used to start or initialise winsock library.
 // It takes 2 parameters ; the first one is the version we want to load and second one is a WSADATA structure
@@ -57,7 +64,7 @@ int init() {
     cout << "Socket binded at port " << DEFAULTPORT << "\n";
 
     // listen for incoming requests
-    if(listen(s, 1) == SOCKET_ERROR) {
+    if(listen(s, 4) == SOCKET_ERROR) {
         cout << "socket failed to listen : \n";
         closesocket(s);
         WSACleanup();
@@ -65,79 +72,48 @@ int init() {
     }
     cout << "Socket is listening for incoming connections... \n";
 
-    SOCKET AcceptSocket = accept(s, NULL, NULL);
-    if (AcceptSocket == INVALID_SOCKET) {
-        cout <<"accept failed \n";
-        closesocket(s);
-        WSACleanup();
-        return 1;
-    } 
-    cout << "connection established! \n";
+    globalListenSocket = s;
 
-    // receiving the request from client and storing it in buffer
-    char buffer[DEFAULTBUFFER] = {0}; 
-    int res = recv(AcceptSocket, buffer, DEFAULTBUFFER, 0);
+    ThreadPool pool(4);    
 
-    if(res == SOCKET_ERROR) {
-        cout << "receiving failed \n";
-        closesocket(AcceptSocket);
-        WSACleanup();
-        return 1;
-    }
-    else if(res == 0) {
-        cout << "connection closed. \n";
-    }
-    else if(res > 0) {
-        cout << "Bytes Recevied : " << res << "\n";
-    }
-   
-    cout << "Request Received... \n\n";
-    cout << "----------- Http Request: -----------\n" << buffer << "\n";
+    while(!stop) {
+        SOCKET AcceptSocket = accept(s, NULL, NULL);
+        if (AcceptSocket != INVALID_SOCKET) {
+           pool.addTask([AcceptSocket] {handleRequest(AcceptSocket);});
+        }
+        else {
+            if(stop) break;
 
-    // parsing the request
-    int output = parseRequest(buffer, res);
-    if(output != 0) {
-        return output;
+            cout <<"Accept failed with Error - " << WSAGetLastError() << "\n";
+            closesocket(s);
+            break;
+        }
     }
 
-    ifstream ReadFile("home\\index.html");
-    if (!ReadFile.is_open()) {
-        cout << "Error: Could not open the file!" << endl;
-        return 1;
-    }
+    cout << "waiting for worker threads to finish... \n";
+    pool.shutDown();
 
-    char ch;
-    int idx = 0;
-    string response(DEFAULTBUFFER,'\0'); 
-
-    while(ReadFile.get(ch)) {
-        response[idx] = ch;
-        idx++;
-    }
-    ReadFile.close();
-
-    // adding headers to the response
-    string httpResponse = "HTTP/1.1 200 OK\r\n";
-    httpResponse += "Content-Type: text/html\r\n"; 
-    httpResponse += "Content-Length: " + to_string(response.length()) + "\r\n";
-    httpResponse += "Connection: close\r\n\r\n";
-    httpResponse += response;
-
-    // sending response to client
-    if(send(AcceptSocket, httpResponse.c_str(), httpResponse.length(), 0) == SOCKET_ERROR) {
-        cout << "sending failed \n";
-    } 
-
-    cout << "----------- Http Response: -----------\n" << httpResponse << "\n";
-
-    closesocket(AcceptSocket);
     WSACleanup();
+    cout << "Server stopped!" << endl;
 }
 
+void sighandler(int sig) {
+    if(sig == SIGINT) {
+        cout << "stop the program! \n";
+        stop = true;
+        
+        if(globalListenSocket != INVALID_SOCKET)  {
+            closesocket(globalListenSocket);
+            globalListenSocket = INVALID_SOCKET;
+        }
+    }
+}
 
 int main()
 {
+    signal(SIGINT, sighandler);
     cout << "Starting web server...\n";
+    cout << "Main thread ID: " << std::this_thread::get_id() << endl;
     init();
 }
 
@@ -185,4 +161,70 @@ bool isPathPresent(string path) {
 
     cout << "Error - Requested Page not Found! \n";
     return false;
+}
+
+void handleRequest(SOCKET AcceptSocket) {
+    cout << "Handling request on Thread ID: " << std::this_thread::get_id() << endl;
+    cout << "connection established! \n";
+
+    // receiving the request from client and storing it in buffer
+    char buffer[DEFAULTBUFFER] = {0}; 
+    int res = recv(AcceptSocket, buffer, DEFAULTBUFFER, 0);
+
+    if(res == SOCKET_ERROR) {
+        cout << "receiving failed \n";
+        closesocket(AcceptSocket);
+        return;
+    }
+    else if(res == 0) {
+        cout << "connection closed. \n";
+        closesocket(AcceptSocket);
+        return;
+    }
+    else if(res > 0) {
+        cout << "Bytes Recevied : " << res << "\n";
+    }
+
+    cout << "----------- Http Request: -----------\n" << buffer << "\n";
+
+    // parsing the request
+    int output = parseRequest(buffer, res);
+    if(output != 0) {
+        cout << "something went wrong in parsingRequest" << endl;
+        closesocket(AcceptSocket);
+        return;
+    }
+
+    ifstream ReadFile("home\\index.html");
+    if (!ReadFile.is_open()) {
+        cout << "Error: Could not open the file!" << endl;
+        closesocket(AcceptSocket);
+        return;
+    }
+
+    char ch;
+    string response = ""; 
+
+    while(ReadFile.get(ch)) {
+        response.push_back(ch);
+    }
+    ReadFile.close();
+
+    // adding headers to the response
+    string httpResponse = "HTTP/1.1 200 OK\r\n";
+    httpResponse += "Content-Type: text/html\r\n"; 
+    httpResponse += "Content-Length: " + to_string(response.length()) + "\r\n";
+    httpResponse += "Connection: close\r\n\r\n";
+    httpResponse += response;
+
+    // sending response to client
+    if(send(AcceptSocket, httpResponse.c_str(), httpResponse.length(), 0) == SOCKET_ERROR) {
+        cout << "sending failed \n";
+        closesocket(AcceptSocket);
+        return;
+    } 
+
+    cout << "----------- Http Response: -----------\n" << httpResponse << "\n";
+    
+    closesocket(AcceptSocket);
 }
